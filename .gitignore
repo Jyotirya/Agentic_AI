@@ -1,0 +1,102 @@
+# Byte-compiled / caches
+__pycache__/
+*.py[cod]
+*$py.class
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+venv.bak/
+
+# Python packaging / build
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Logs
+logs/
+*.log
+debug.log
+
+# Jupyter
+.ipynb_checkpoints
+*.ipynb_checkpoints
+nboutput/
+output/
+
+# Data & datasets (large files)
+data/
+datasets/
+raw_data/
+processed_data/
+downloads/
+
+# Model artifacts / weights / checkpoints
+checkpoints/
+saved_models/
+weights/
+models/weights/
+models/checkpoints/
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.h5
+*.hdf5
+*.onnx
+*.pb
+*.bin
+*.model
+*.tar
+*.tar.gz
+
+# Caches (huggingface, transformers, torch, pip)
+.cache/
+.cache/huggingface/
+transformers_cache/
+torch_cache/
+huggingface/
+hf_cache/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# LangGraph (local caches, logs, state)
+.langgraph/
+langgraph_cache/
+langgraph_logs/
+*.lgcache
+
+# Secrets / creds
+.env
+*.env
+.env.local
+secrets.yml
+credentials.json
+*.pem
+*.key
+*.crt
+
+# IDE / editor
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker / containers
+docker-compose.override.yml
+*.log
+
+# Misc
+coverage.xml
+htmlcov/
+.venv_test/

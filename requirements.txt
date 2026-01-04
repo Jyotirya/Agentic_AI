@@ -1,0 +1,5 @@
+transformers
+langchain
+langchain-huggingface
+langgraph
+huggingface_hub
