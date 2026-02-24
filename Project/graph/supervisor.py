@@ -1,10 +1,12 @@
 """
 Supervisor - LangGraph-based workflow orchestration
 This module manages the RAG pipeline with conditional routing and error handling.
+Includes integrated verification pipeline for citation tracking, conflict detection,
+and confidence scoring.
 """
 
 from langgraph.graph import StateGraph, END
-from typing import TypedDict, List, Optional, Dict
+from typing import TypedDict, List, Optional, Dict, Any
 import logging
 from agents.scraper_agent import scrape_department_data_with_metadata
 from agents.embedding_agent import get_embedding_manager
@@ -12,6 +14,20 @@ from agents.query_agent import get_query_manager, retrieve_context_with_metadata
 from agents.response_agent import generate_answer_with_metadata
 from utils.chunking import chunk_documents_with_metadata
 from utils.prompts import classify_query_type, get_prompt_for_query_type
+
+# Import verification components
+from utils.citation_tracker import (
+    get_citation_tracker, Citation, ProvenanceTrace
+)
+from utils.conflict_detector import (
+    get_conflict_detector, ConflictReport, detect_conflicts
+)
+from utils.confidence_scorer import (
+    get_confidence_scorer, ConfidenceReport, calculate_confidence
+)
+from utils.verification_pipeline import (
+    get_verification_pipeline, VerificationResult, verify_response
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -45,6 +61,15 @@ class GraphState(TypedDict):
     answer: str
     confidence: Optional[float]
     
+    # Verification Components (NEW)
+    citations: Optional[List[Dict]]
+    provenance_trace: Optional[Dict]
+    conflict_report: Optional[Dict]
+    confidence_report: Optional[Dict]
+    verification_result: Optional[Dict]
+    verification_status: Optional[str]
+    risk_level: Optional[str]
+    
     # State management
     error: Optional[str]
     skip_scraping: bool
@@ -52,7 +77,7 @@ class GraphState(TypedDict):
 
 
 class RAGSupervisor:
-    """Manages the RAG workflow"""
+    """Manages the RAG workflow with integrated verification"""
     
     def __init__(self, use_persistent_storage: bool = True):
         """
@@ -64,6 +89,13 @@ class RAGSupervisor:
         self.use_persistent_storage = use_persistent_storage
         self.embedding_manager = get_embedding_manager()
         self.query_manager = get_query_manager()
+        
+        # Initialize verification components
+        self.citation_tracker = get_citation_tracker()
+        self.conflict_detector = get_conflict_detector()
+        self.confidence_scorer = get_confidence_scorer()
+        self.verification_pipeline = get_verification_pipeline()
+        
         self.graph = self._build_graph()
     
     def _build_graph(self) -> any:
@@ -78,6 +110,7 @@ class RAGSupervisor:
         graph.add_node("classify_query", self._classify_query)
         graph.add_node("query", self._query)
         graph.add_node("respond", self._respond)
+        graph.add_node("verify", self._verify)  # NEW: Verification node
         graph.add_node("handle_error", self._handle_error)
         
         # Set entry point
@@ -107,7 +140,9 @@ class RAGSupervisor:
             }
         )
         
-        graph.add_edge("respond", END)
+        # Add verification step after response generation
+        graph.add_edge("respond", "verify")
+        graph.add_edge("verify", END)
         graph.add_edge("handle_error", END)
         
         return graph.compile()
@@ -307,6 +342,59 @@ class RAGSupervisor:
         
         return state
     
+    def _verify(self, state: GraphState) -> GraphState:
+        """
+        Run verification pipeline on the generated response.
+        Includes citation tracking, conflict detection, and confidence scoring.
+        """
+        try:
+            question = state.get("question", "")
+            answer = state.get("answer", "")
+            context = state.get("context", [])
+            context_metadata = state.get("context_metadata", [])
+            context_scores = state.get("context_scores", [])
+            
+            if not context or not answer:
+                logger.warning("Skipping verification - no context or answer")
+                state["verification_status"] = "skipped"
+                return state
+            
+            logger.info("Running verification pipeline...")
+            
+            # Run full verification
+            verification_result = self.verification_pipeline.verify(
+                query=question,
+                answer=answer,
+                documents=context,
+                metadatas=context_metadata,
+                retrieval_scores=context_scores
+            )
+            
+            # Store verification results in state
+            state["citations"] = [c.to_dict() for c in verification_result.citations]
+            state["provenance_trace"] = verification_result.provenance_trace.to_dict()
+            state["conflict_report"] = verification_result.conflict_report.to_dict()
+            state["confidence_report"] = verification_result.confidence_report.to_dict()
+            state["verification_result"] = verification_result.to_dict()
+            state["verification_status"] = verification_result.summary.status.value
+            state["risk_level"] = verification_result.summary.risk_level.value
+            
+            # Update confidence with verification-based confidence
+            state["confidence"] = verification_result.summary.confidence_score
+            
+            logger.info(
+                f"Verification complete: {verification_result.summary.status.value} "
+                f"(confidence: {verification_result.summary.confidence_score:.1%}, "
+                f"conflicts: {verification_result.summary.conflict_count})"
+            )
+            
+        except Exception as e:
+            logger.error(f"Error in verification: {str(e)}")
+            state["verification_status"] = "error"
+            state["error"] = f"Verification error: {str(e)}"
+        
+        return state
+    
     def _handle_error(self, state: GraphState) -> GraphState:
         """Handle errors gracefully"""
         error = state.get("error", "Unknown error")
@@ -342,6 +430,15 @@ class RAGSupervisor:
             "query_type": None,
             "answer": "",
             "confidence": None,
+            # Verification fields
+            "citations": None,
+            "provenance_trace": None,
+            "conflict_report": None,
+            "confidence_report": None,
+            "verification_result": None,
+            "verification_status": None,
+            "risk_level": None,
+            # State management
             "error": None,
             "skip_scraping": False,
             "retry_count": 0
@@ -351,6 +448,107 @@ class RAGSupervisor:
         result = self.graph.invoke(initial_state)
         
         return result
+    
+    def get_verification_summary(self, result: Dict) -> str:
+        """
+        Get a formatted verification summary from a result.
+        
+        Args:
+            result: Result from invoke()
+            
+        Returns:
+            Formatted verification summary string
+        """
+        verification_status = result.get("verification_status", "unknown")
+        confidence = result.get("confidence", 0.0)
+        risk_level = result.get("risk_level", "unknown")
+        
+        # Get conflict info
+        conflict_report = result.get("conflict_report", {})
+        num_conflicts = len(conflict_report.get("conflicts", []))
+        
+        # Get citation info
+        citations = result.get("citations", [])
+        num_citations = len(citations)
+        num_sources = len(set(c.get("source_file", "") for c in citations))
+        
+        # Format status emoji
+        status_emoji = {
+            "verified": "✅",
+            "partially_verified": "⚠️",
+            "needs_review": "🔍",
+            "unverified": "❌",
+            "skipped": "⏭️",
+            "error": "💥"
+        }
+        
+        risk_emoji = {
+            "low": "🟢",
+            "moderate": "🟡",
+            "high": "🟠",
+            "critical": "🔴"
+        }
+        
+        lines = [
+            "─" * 50,
+            "📋 **Verification Summary**",
+            f"  Status: {status_emoji.get(verification_status, '❓')} {verification_status.replace('_', ' ').title()}",
+            f"  Confidence: {confidence:.1%}",
+            f"  Risk Level: {risk_emoji.get(risk_level, '⚪')} {risk_level.title() if risk_level else 'Unknown'}",
+            f"  Conflicts: {num_conflicts} detected",
+            f"  Citations: {num_citations} from {num_sources} source(s)",
+            "─" * 50
+        ]
+        
+        return "\n".join(lines)
+    
+    def format_citations(self, result: Dict, format_type: str = "compact") -> str:
+        """
+        Format citations from a result.
+        
+        Args:
+            result: Result from invoke()
+            format_type: "detailed", "compact", or "inline"
+            
+        Returns:
+            Formatted citations string
+        """
+        citations = result.get("citations", [])
+        
+        if not citations:
+            return "No citations available."
+        
+        if format_type == "inline":
+            sources = set(c.get("source_file", "unknown") for c in citations)
+            return f"Sources: {', '.join(sources)}"
+        
+        elif format_type == "compact":
+            lines = ["**Sources:**"]
+            for i, citation in enumerate(citations[:5], 1):
+                source = citation.get("source_file", "unknown")
+                source_type = citation.get("source_type", "unknown")
+                score = citation.get("relevance_score", 0)
+                lines.append(f"  [{i}] {source} ({source_type}) - {score:.0%} relevance")
+            
+            if len(citations) > 5:
+                lines.append(f"  ... and {len(citations) - 5} more")
+            
+            return "\n".join(lines)
+        
+        else:  # detailed
+            lines = ["📚 **Sources and Citations:**\n"]
+            
+            for i, citation in enumerate(citations, 1):
+                lines.append(f"**[{i}] {citation.get('source_type', 'Unknown').title()} Source**")
+                lines.append(f"  - File: `{citation.get('source_file', 'unknown')}`")
+                lines.append(f"  - Document ID: `{citation.get('document_id', 'unknown')}`")
+                lines.append(f"  - Relevance: {citation.get('relevance_score', 0):.2%}")
+                lines.append(f"  - Reliability: {citation.get('reliability', 'unknown').title()}")
+                snippet = citation.get('content_snippet', '')[:150]
+                lines.append(f"  - Content: \"{snippet}...\"")
+                lines.append("")
+            
+            return "\n".join(lines)
 
 
 # Global supervisor instance

@@ -74,9 +74,12 @@ def interactive_mode():
     print("=" * 60)
     print("IITB EE Department RAG Assistant - Interactive Mode")
     print("=" * 60)
-    print("Type 'exit' or 'quit' to stop\n")
+    print("Type 'exit' or 'quit' to stop")
+    print("Type 'citations' after a query to see detailed sources")
+    print("Type 'verify' after a query to see full verification report\n")
     
     supervisor = get_supervisor()
+    last_result = None
     
     while True:
         try:
@@ -89,13 +92,33 @@ def interactive_mode():
                 print("\n👋 Goodbye!")
                 break
             
+            # Handle post-query commands
+            if question.lower() == 'citations' and last_result:
+                print("\n" + supervisor.format_citations(last_result, "detailed"))
+                continue
+            
+            if question.lower() == 'verify' and last_result:
+                print("\n" + supervisor.get_verification_summary(last_result))
+                # Show conflict info if any
+                conflict_report = last_result.get('conflict_report', {})
+                if conflict_report and not conflict_report.get('conflict_free', True):
+                    conflicts = conflict_report.get('conflicts', [])
+                    print(f"\n⚠️ {len(conflicts)} conflict(s) detected:")
+                    for i, conflict in enumerate(conflicts[:3], 1):
+                        print(f"  {i}. {conflict.get('description', 'Unknown conflict')}")
+                continue
+            
             print("\n🤔 Thinking...\n")
             
             result = supervisor.invoke({"question": question})
+            last_result = result
             
             print(f"💡 Assistant: {result['answer']}\n")
             
-            if result.get('confidence'):
+            # Display verification summary
+            if result.get('verification_status'):
+                print(supervisor.get_verification_summary(result))
+            elif result.get('confidence'):
                 print(f"   Confidence: {result['confidence']*100:.1f}%")
             
             if result.get('context'):
@@ -125,14 +148,42 @@ def single_query_mode(question: str):
     print(result['answer'])
     print()
     
-    if result.get('confidence'):
+    # Display verification summary
+    if result.get('verification_status'):
+        print(supervisor.get_verification_summary(result))
+        
+        # Show risk warning if needed
+        risk_level = result.get('risk_level', 'unknown')
+        if risk_level in ['high', 'critical']:
+            print(f"\n🚨 WARNING: {risk_level.upper()} RISK - Verify this information from official sources")
+    elif result.get('confidence'):
         print(f"Confidence: {result['confidence']*100:.1f}%")
     
-    if result.get('context'):
+    if result.get('citations'):
+        citations = result['citations']
+        num_sources = len(set(c.get('source_file', '') for c in citations))
+        print(f"\n📚 Sources used: {len(citations)} citations from {num_sources} source(s)")
+        
+        print("\nTop sources:")
+        for i, citation in enumerate(citations[:3], 1):
+            source = citation.get('source_file', 'unknown')
+            snippet = citation.get('content_snippet', '')[:150]
+            relevance = citation.get('relevance_score', 0)
+            print(f"\n[{i}] {source} (relevance: {relevance:.0%})")
+            print(f"    \"{snippet}...\"")
+    elif result.get('context'):
         print(f"Sources used: {len(result['context'])}")
         print("\nTop sources:")
         for i, ctx in enumerate(result['context'][:2], 1):
             print(f"\n[{i}] {ctx[:200]}...")
+    
+    # Show conflict warnings if any
+    conflict_report = result.get('conflict_report', {})
+    if conflict_report and not conflict_report.get('conflict_free', True):
+        conflicts = conflict_report.get('conflicts', [])
+        print(f"\n⚠️ {len(conflicts)} potential conflict(s) detected in sources:")
+        for i, conflict in enumerate(conflicts[:2], 1):
+            print(f"  {i}. {conflict.get('conflict_type', 'unknown')}: {conflict.get('description', 'No description')}")
     
     print()
 

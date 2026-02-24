@@ -95,6 +95,8 @@ with st.sidebar:
     
     show_sources = st.checkbox("Show Sources", value=True)
     show_confidence = st.checkbox("Show Confidence", value=True)
+    show_verification = st.checkbox("Show Verification Details", value=True)
+    show_conflicts = st.checkbox("Show Conflict Warnings", value=True)
     show_metadata = st.checkbox("Show Metadata", value=False)
     
     # Query type filter
@@ -153,6 +155,40 @@ for idx, message in enumerate(st.session_state.messages):
                     conf_percent = confidence * 100
                     color = "green" if confidence > 0.7 else "orange" if confidence > 0.4 else "red"
                     st.markdown(f"**Confidence:** <span style='color: {color}'>{conf_percent:.1f}%</span>", unsafe_allow_html=True)
+            
+            # Verification status
+            if show_verification and "verification_status" in metadata:
+                status = metadata.get("verification_status", "unknown")
+                risk = metadata.get("risk_level", "unknown")
+                
+                status_icons = {
+                    "verified": "✅",
+                    "partially_verified": "⚠️",
+                    "needs_review": "🔍",
+                    "unverified": "❌",
+                    "skipped": "⏭️"
+                }
+                risk_colors = {
+                    "low": "green",
+                    "moderate": "orange",
+                    "high": "red",
+                    "critical": "darkred"
+                }
+                
+                st.markdown(
+                    f"**Status:** {status_icons.get(status, '❓')} {status.replace('_', ' ').title()} | "
+                    f"**Risk:** <span style='color: {risk_colors.get(risk, 'gray')}'>{risk.title()}</span>",
+                    unsafe_allow_html=True
+                )
+            
+            # Conflict warnings
+            if show_conflicts and "conflict_report" in metadata:
+                conflict_report = metadata.get("conflict_report", {})
+                if conflict_report and not conflict_report.get("conflict_free", True):
+                    conflicts = conflict_report.get("conflicts", [])
+                    with st.expander(f"⚠️ {len(conflicts)} Conflict(s) Detected"):
+                        for i, conflict in enumerate(conflicts[:3], 1):
+                            st.warning(f"**{i}. {conflict.get('conflict_type', 'Unknown')}:** {conflict.get('description', 'No description')}")
             
             # Query type
             if show_metadata and "query_type" in metadata:
@@ -216,7 +252,12 @@ if question := st.chat_input("Ask your question here..."):
                         "confidence": result.get("confidence"),
                         "query_type": result.get("query_type"),
                         "context": result.get("context", []),
-                        "context_scores": result.get("context_scores", [])
+                        "context_scores": result.get("context_scores", []),
+                        "verification_status": result.get("verification_status"),
+                        "risk_level": result.get("risk_level"),
+                        "citations": result.get("citations"),
+                        "conflict_report": result.get("conflict_report"),
+                        "confidence_report": result.get("confidence_report")
                     }
                 }
                 st.session_state.messages.append(message_data)
@@ -231,21 +272,73 @@ if question := st.chat_input("Ask your question here..."):
                     color = "green" if confidence > 0.7 else "orange" if confidence > 0.4 else "red"
                     st.markdown(f"**Confidence:** <span style='color: {color}'>{conf_percent:.1f}%</span>", unsafe_allow_html=True)
                 
+                # Show verification status
+                if show_verification and result.get("verification_status"):
+                    status = result.get("verification_status", "unknown")
+                    risk = result.get("risk_level", "unknown")
+                    
+                    status_icons = {
+                        "verified": "✅",
+                        "partially_verified": "⚠️",
+                        "needs_review": "🔍",
+                        "unverified": "❌"
+                    }
+                    risk_colors = {
+                        "low": "green",
+                        "moderate": "orange",
+                        "high": "red",
+                        "critical": "darkred"
+                    }
+                    
+                    st.markdown(
+                        f"**Verification:** {status_icons.get(status, '❓')} {status.replace('_', ' ').title()} | "
+                        f"**Risk:** <span style='color: {risk_colors.get(risk, 'gray')}'>{risk.title() if risk else 'Unknown'}</span>",
+                        unsafe_allow_html=True
+                    )
+                
+                # Show conflict warnings
+                if show_conflicts and result.get("conflict_report"):
+                    conflict_report = result.get("conflict_report", {})
+                    if not conflict_report.get("conflict_free", True):
+                        conflicts = conflict_report.get("conflicts", [])
+                        with st.expander(f"⚠️ {len(conflicts)} Conflict(s) Detected"):
+                            for i, conflict in enumerate(conflicts[:3], 1):
+                                st.warning(f"**{i}. {conflict.get('conflict_type', 'Unknown')}:** {conflict.get('description', 'No description')}")
+                            recommendations = conflict_report.get("recommendations", [])
+                            if recommendations:
+                                st.info("**Recommendations:**\n" + "\n".join(f"• {r}" for r in recommendations[:3]))
+                
                 # Show query type
                 if show_metadata and result.get("query_type"):
                     st.markdown(f"**Query Type:** {result['query_type'].title()}")
                 
-                # Show sources
-                if show_sources and result.get("context"):
-                    with st.expander("📄 View Sources"):
-                        context_list = result["context"]
-                        scores = result.get("context_scores", [])
-                        
-                        for i, ctx in enumerate(context_list[:3]):
-                            st.markdown(f"**Source {i+1}:**")
-                            if scores and i < len(scores):
-                                st.markdown(f"*Relevance: {scores[i]:.2f}*")
-                            st.markdown(f'<div class="source-box">{ctx[:300]}...</div>', unsafe_allow_html=True)
+                # Show sources with enhanced citation info
+                if show_sources and (result.get("citations") or result.get("context")):
+                    with st.expander("📄 View Sources & Citations"):
+                        # Use citations if available, fallback to context
+                        if result.get("citations"):
+                            citations = result["citations"]
+                            st.markdown(f"**{len(citations)} citation(s) from {len(set(c.get('source_file', '') for c in citations))} source(s)**")
+                            
+                            for i, citation in enumerate(citations[:5], 1):
+                                source_file = citation.get("source_file", "unknown")
+                                source_type = citation.get("source_type", "unknown")
+                                relevance = citation.get("relevance_score", 0)
+                                reliability = citation.get("reliability", "unknown")
+                                snippet = citation.get("content_snippet", "")[:250]
+                                
+                                st.markdown(f"**[{i}] {source_type.title()} - {source_file}**")
+                                st.markdown(f"*Relevance: {relevance:.0%} | Reliability: {reliability.title()}*")
+                                st.markdown(f'<div class="source-box">{snippet}...</div>', unsafe_allow_html=True)
+                        else:
+                            context_list = result.get("context", [])
+                            scores = result.get("context_scores", [])
+                            
+                            for i, ctx in enumerate(context_list[:3]):
+                                st.markdown(f"**Source {i+1}:**")
+                                if scores and i < len(scores):
+                                    st.markdown(f"*Relevance: {scores[i]:.2f}*")
+                                st.markdown(f'<div class="source-box">{ctx[:300]}...</div>', unsafe_allow_html=True)
                 
                 # Feedback buttons
                 msg_idx = len(st.session_state.messages) - 1

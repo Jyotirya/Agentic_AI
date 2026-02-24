@@ -1,10 +1,12 @@
 """
 Response Agent - Generates natural language answers using LLM
 This module handles the generation of contextual responses using Google's Gemini API.
+Includes enhanced confidence estimation and citation-aware response generation.
 """
 
 import os
 import logging
+import re
 from typing import List, Dict, Optional
 import google.generativeai as genai
 from dotenv import load_dotenv
@@ -107,7 +109,8 @@ Please provide a comprehensive answer based on the context above. If the context
     
     def _estimate_confidence(self, answer: str, context: List[str]) -> float:
         """
-        Estimate confidence score based on answer and context
+        Estimate confidence score based on answer and context.
+        Uses multiple heuristics for a more accurate estimate.
         
         Args:
             answer: Generated answer
@@ -116,22 +119,73 @@ Please provide a comprehensive answer based on the context above. If the context
         Returns:
             Confidence score between 0 and 1
         """
-        # Simple heuristic: check for uncertainty phrases
+        # Start with base confidence
+        confidence = 0.5
+        
+        # 1. Check for uncertainty phrases (negative impact)
         uncertainty_phrases = [
             "i don't know", "i'm not sure", "unclear", 
             "not enough information", "cannot determine",
-            "i apologize", "i cannot"
+            "i apologize", "i cannot", "no information",
+            "not found", "not available", "outside the scope"
         ]
         
         answer_lower = answer.lower()
-        if any(phrase in answer_lower for phrase in uncertainty_phrases):
-            return 0.3
+        uncertainty_count = sum(1 for phrase in uncertainty_phrases if phrase in answer_lower)
+        if uncertainty_count > 0:
+            confidence -= min(0.3, uncertainty_count * 0.1)
         
-        # Check if answer references context
-        if "context" in answer_lower or "according to" in answer_lower:
-            return 0.85
+        # 2. Check for confident language (positive impact)
+        confident_phrases = [
+            "according to", "based on the", "the context shows",
+            "specifically", "it states that", "as mentioned",
+            "the information indicates", "clearly"
+        ]
+        confident_count = sum(1 for phrase in confident_phrases if phrase in answer_lower)
+        if confident_count > 0:
+            confidence += min(0.2, confident_count * 0.05)
         
-        return 0.7
+        # 3. Check context coverage
+        if context:
+            # Count how many context terms appear in answer
+            context_terms = set()
+            for ctx in context:
+                context_terms.update(ctx.lower().split())
+            
+            answer_terms = set(answer_lower.split())
+            
+            # Remove common words
+            stopwords = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be',
+                        'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by',
+                        'and', 'or', 'but', 'if', 'then', 'it', 'this', 'that'}
+            context_terms -= stopwords
+            answer_terms -= stopwords
+            
+            if answer_terms:
+                coverage = len(answer_terms & context_terms) / len(answer_terms)
+                confidence += coverage * 0.15
+        
+        # 4. Check for specific details (positive impact)
+        has_numbers = bool(re.search(r'\d+', answer))
+        has_codes = bool(re.search(r'[A-Z]{2,4}\d{3,4}', answer))
+        has_names = bool(re.search(r'\b[A-Z][a-z]+ [A-Z][a-z]+\b', answer))
+        
+        specificity_bonus = (has_numbers * 0.05) + (has_codes * 0.05) + (has_names * 0.05)
+        confidence += specificity_bonus
+        
+        # 5. Answer length heuristic
+        answer_words = len(answer.split())
+        if answer_words < 10:
+            confidence -= 0.1  # Very short answers may be incomplete
+        elif answer_words > 50:
+            confidence += 0.05  # Longer detailed answers
+        
+        # 6. Context count bonus
+        if len(context) >= 3:
+            confidence += 0.1  # Multiple supporting contexts
+        
+        # Clamp confidence between 0 and 1
+        return max(0.0, min(1.0, confidence))
     
     def get_conversation_history(self) -> List[Dict]:
         """Get the conversation history"""
